@@ -1,0 +1,88 @@
+pipeline {
+    agent any
+    environment {
+        VENV_DIR = "venv"
+        MAIN_FILE = "app.py"
+        PORT = "8501"
+        WORK_DIR = "."  // Asumsikan semua file ada di root
+        PATH = "/usr/local/bin:/usr/bin:/bin:$PATH"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                cleanWs()
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: '*/main']],
+                    userRemoteConfigs: [[url: 'https://github.com/regressoryjh/caps-log.git']]
+                ])
+                sh 'ls -la'
+            }
+        }
+
+        stage('Build Environment') {
+            steps {
+                dir("${env.WORK_DIR}") {
+                    sh '''
+                        rm -rf ${VENV_DIR} || true
+                        python3 -m venv ${VENV_DIR}
+                        . ${VENV_DIR}/bin/activate
+                        pip install --upgrade pip
+                        pip install -r requirements.txt
+                    '''
+                }
+            }
+        }
+
+        stage('Run Tests') {
+            steps {
+                dir("${env.WORK_DIR}") {
+                    script {
+                        def hasTests = sh(
+                            script: 'test -d tests',
+                            returnStatus: true
+                        ) == 0
+                        if (hasTests) {
+                            sh '''
+                                . ${VENV_DIR}/bin/activate
+                                pip install pytest
+                                pytest tests/
+                            '''
+                        } else {
+                            echo "⚠ Skipping tests: folder 'tests/' not found"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Deploy Streamlit') {
+            steps {
+                dir("${env.WORK_DIR}") {
+                    sh '''
+                        pkill -f "streamlit.*${MAIN_FILE}" || true
+                        . ${VENV_DIR}/bin/activate
+                        nohup streamlit run ${MAIN_FILE} --server.port=${PORT} --server.headless=true --server.address=0.0.0.0 > streamlit.log 2>&1 &
+                        echo $! > streamlit.pid
+                        echo "✅ Streamlit running on port ${PORT}"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            dir("${env.WORK_DIR}") {
+                archiveArtifacts artifacts: 'streamlit.log', allowEmptyArchive: true
+            }
+        }
+        success {
+            echo "✅ Build & Deploy Succeeded"
+        }
+        failure {
+            echo "❌ Build or Deploy Failed"
+        }
+    }
+}
